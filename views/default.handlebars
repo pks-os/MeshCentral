@@ -1406,6 +1406,8 @@
                             <div>Encoding</div>
                             <select id="d7encoding" dir="rtl">
                                 <option value=1>JPEG</option>
+                                <option value=2>PNG</option>
+                                <option value=3>TIFF</option>
                                 <option selected=selected value=4>WEBP</option>
                             </select>
                         </div>
@@ -8509,7 +8511,7 @@
                 // Intel AMT One Click Recovery (OCR)
                 Q('d3localmodeform').action = 'oneclickrecovery.ashx';
                 Q('d3auth').value = authCookie;
-                Q('d3filter').value = '.iso';
+                Q('d3filter').value = '.efi';
                 Q('d3attrib').value = currentNode._id;
                 setDialogMode(3, "Intel&reg; AMT One Click Recovery", 3, deviceActionOneClickRecovery);
                 d3init();
@@ -13698,7 +13700,7 @@
             p20editMeshAmtChange();
 
             // Set the current Intel AMT policy
-            if (currentMesh.amt && (currentMesh.amt.type == 2) || (currentMesh.amt.type == 3)) {
+            if (currentMesh.amt && ((currentMesh.amt.type == 2) || (currentMesh.amt.type == 3))) {
                 Q('dp20amtpolicypass').value = currentMesh.amt.password;
                 if ((currentMesh.amt.type == 2) || (currentMesh.amt.type == 3)) {
                     if (currentMesh.amt.badpass != null) { Q('dp20amtbadpass').value = currentMesh.amt.badpass; }
