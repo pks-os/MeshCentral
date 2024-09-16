@@ -75,6 +75,19 @@ function linux_identifiers()
                 identifiers['board_vendor'] = 'Raspberry Pi';
                 identifiers['board_name'] = require('fs').readFileSync('/sys/firmware/devicetree/base/model').toString().trim();
                 identifiers['board_serial'] = require('fs').readFileSync('/sys/firmware/devicetree/base/serial-number').toString().trim();
+                const memorySlots = [];
+                var child = require('child_process').execFile('/bin/sh', ['sh']);
+                child.stdout.str = ''; child.stdout.on('data', dataHandler);
+                child.stdin.write('vcgencmd get_mem arm && vcgencmd get_mem gpu\nexit\n');
+                child.waitExit();
+                try { 
+                    const lines = child.stdout.str.trim().split('\n');
+                    if (lines.length == 2) {
+                        memorySlots.push({ Locator: "ARM Memory", Size: lines[0].split('=')[1].trim() })
+                        memorySlots.push({ Locator: "GPU Memory", Size: lines[1].split('=')[1].trim() })
+                        ret.memory = { Memory_Device: memorySlots };
+                    }
+                } catch (xx) { }
             } else {
                 throw('Unknown board');
             }
@@ -351,7 +364,18 @@ function linux_identifiers()
         child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
         child.stderr.on('data', function () { });
         child.waitExit();
-        values.linux.LastBootUpTime = child.stdout.str.trim();
+        var regex = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+        if (regex.test(child.stdout.str.trim())) {
+            values.linux.LastBootUpTime = child.stdout.str.trim();
+        } else {
+            child = require('child_process').execFile('/bin/sh', ['sh']);
+            child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
+            child.stdin.write('date -d "@$(( $(date +%s) - $(awk \'{print int($1)}\' /proc/uptime) ))" "+%Y-%m-%d %H:%M:%S"\nexit\n');
+            child.waitExit();
+            if (regex.test(child.stdout.str.trim())) {
+                values.linux.LastBootUpTime = child.stdout.str.trim();
+            }
+        }
         child = null;
     } catch (ex) { }
 
