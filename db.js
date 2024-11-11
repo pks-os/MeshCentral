@@ -39,6 +39,17 @@ module.exports.CreateDB = function (parent, func) {
     let databaseName = 'meshcentral';
     let datapathParentPath = path.dirname(parent.datapath);
     let datapathFoldername = path.basename(parent.datapath);
+    const SQLITE_AUTOVACUUM = ['none', 'full', 'incremental'];
+    const SQLITE_SYNCHRONOUS = ['off', 'normal', 'full', 'extra'];
+    obj.sqliteConfig = {
+        maintenance: '',
+        startupVacuum: false,
+        autoVacuum: 'full',
+        incrementalVacuum: 100,
+        journalMode: 'delete',
+        journalSize: 4096000,
+        synchronous: 'full',
+    };
     obj.performingBackup = false;
     const BACKUPFAIL_ZIPCREATE = 0x0001;
     const BACKUPFAIL_ZIPMODULE = 0x0010;
@@ -119,6 +130,7 @@ module.exports.CreateDB = function (parent, func) {
 
     // Perform database maintenance
     obj.maintenance = function () {
+        parent.debug('db', 'Entering database maintenance');
         if (obj.databaseType == DB_NEDB) { // NeDB will not remove expired records unless we try to access them. This will force the removal.
             obj.eventsfile.remove({ time: { '$lt': new Date(Date.now() - (expireEventsSeconds * 1000)) } }, { multi: true }); // Force delete older events
             obj.powerfile.remove({ time: { '$lt': new Date(Date.now() - (expirePowerEventsSeconds * 1000)) } }, { multi: true }); // Force delete older events
@@ -138,12 +150,21 @@ module.exports.CreateDB = function (parent, func) {
                 });
             });
         } else if (obj.databaseType == DB_SQLITE) { // SQLite3
-            // TODO: Combine with others?
-            sqlDbQuery('DELETE FROM events WHERE time < ?', [new Date(Date.now() - (expireEventsSeconds * 1000))], function (doc, err) { }); 
-            sqlDbQuery('DELETE FROM power WHERE time < ?', [new Date(Date.now() - (expirePowerEventsSeconds * 1000))], function (doc, err) { });
-            sqlDbQuery('DELETE FROM serverstats WHERE expire < ?', [new Date()], function (doc, err) { });
-            sqlDbQuery('DELETE FROM smbios WHERE expire < ?', [new Date()], function (doc, err) { });
-            obj.file.run( 'PRAGMA optimize;' ); //see https://sqlite.org/pragma.html#pragma_optimize
+            //sqlite does not return rows affected for INSERT, UPDATE or DELETE statements, see https://www.sqlite.org/pragma.html#pragma_count_changes
+            obj.file.serialize(function () {
+                obj.file.run('DELETE FROM events WHERE time < ?', [new Date(Date.now() - (expireEventsSeconds * 1000))]); 
+                obj.file.run('DELETE FROM power WHERE time < ?', [new Date(Date.now() - (expirePowerEventsSeconds * 1000))]);
+                obj.file.run('DELETE FROM serverstats WHERE expire < ?', [new Date()]);
+                obj.file.run('DELETE FROM smbios WHERE expire < ?', [new Date()]);
+                obj.file.exec(obj.sqliteConfig.maintenance, function (err) {
+                    if (err) {console.log('Maintenance error: ' + err.message)};
+                    if (parent.config.settings.debug) {
+                        sqliteGetPragmas(['freelist_count', 'page_size', 'page_count', 'cache_size' ], function (pragma, pragmaValue) {
+                            parent.debug('db', 'SQLite Maintenance: ' + pragma + '=' + pragmaValue);
+                        });
+                    };
+                });
+            });
         }
         obj.removeInactiveDevices();
     }
@@ -742,13 +763,29 @@ module.exports.CreateDB = function (parent, func) {
         // SQLite3 database setup
         obj.databaseType = DB_SQLITE;
         const sqlite3 = require('sqlite3');
-        if (typeof parent.config.settings.sqlite3 == 'string') {databaseName = parent.config.settings.sqlite3};
-        //use sqlite3 cache mode https://github.com/TryGhost/node-sqlite3/wiki/Caching#caching
-        obj.file = new sqlite3.cached.Database(parent.path.join(parent.datapath, databaseName + '.sqlite'), sqlite3.OPEN_READWRITE, function (err) {
+        let configParams = parent.config.settings.sqlite3;
+        if (typeof configParams == 'string') {databaseName = configParams} else {databaseName = configParams.name ? configParams.name : 'meshcentral';};
+        obj.sqliteConfig.startupVacuum = configParams.startupvacuum ? configParams.startupvacuum : false;
+        obj.sqliteConfig.autoVacuum = configParams.autovacuum ? configParams.autovacuum.toLowerCase() : 'incremental';
+        obj.sqliteConfig.incrementalVacuum = configParams.incrementalvacuum ? configParams.incrementalvacuum : 100;
+        obj.sqliteConfig.journalMode = configParams.journalmode ? configParams.journalmode.toLowerCase() : 'delete';
+        //allowed modes, 'none' excluded because not usefull for this app, maybe also remove 'memory'?
+        if (!(['delete', 'truncate', 'persist', 'memory', 'wal'].includes(obj.sqliteConfig.journalMode))) { obj.sqliteConfig.journalMode = 'delete'};
+        obj.sqliteConfig.journalSize = configParams.journalsize ? configParams.journalsize : 409600;
+        //wal can use the more performant 'normal' mode, see https://www.sqlite.org/pragma.html#pragma_synchronous
+        obj.sqliteConfig.synchronous = (obj.sqliteConfig.journalMode == 'wal') ? 'normal' : 'full';
+        if (obj.sqliteConfig.journalMode == 'wal') {obj.sqliteConfig.maintenance += 'PRAGMA wal_checkpoint(PASSIVE);'};
+        if (obj.sqliteConfig.autoVacuum == 'incremental') {obj.sqliteConfig.maintenance += 'PRAGMA incremental_vacuum(' + obj.sqliteConfig.incrementalVacuum + ');'};
+        obj.sqliteConfig.maintenance += 'PRAGMA optimize;';
+        
+        parent.debug('db', 'SQlite config options: ' + JSON.stringify(obj.sqliteConfig, null, 4));
+        if (obj.sqliteConfig.journalMode == 'memory') { console.log('[WARNING] journal_mode=memory: this can lead to database corruption if there is a crash during a transaction. See https://www.sqlite.org/pragma.html#pragma_journal_mode') };
+        //.cached not usefull
+        obj.file = new sqlite3.Database(parent.path.join(parent.datapath, databaseName + '.sqlite'), sqlite3.OPEN_READWRITE, function (err) {
             if (err && (err.code == 'SQLITE_CANTOPEN')) {
                 // Database needs to be created
                 obj.file = new sqlite3.Database(parent.path.join(parent.datapath, databaseName + '.sqlite'), function (err) {
-                    if (err) { console.log("SQLite Error: " + err); process.exit(1);; return; }
+                    if (err) { console.log("SQLite Error: " + err); process.exit(1); }
                     obj.file.exec(`
                         CREATE TABLE main (id VARCHAR(256) PRIMARY KEY NOT NULL, type CHAR(32), domain CHAR(64), extra CHAR(255), extraex CHAR(255), doc JSON);
                         CREATE TABLE events(id INTEGER PRIMARY KEY, time TIMESTAMP, domain CHAR(64), action CHAR(255), nodeid CHAR(255), userid CHAR(255), doc JSON);
@@ -771,23 +808,18 @@ module.exports.CreateDB = function (parent, func) {
                         CREATE INDEX ndxsmbiosexpire ON smbios (expire);
                         `, function (err) {
                             // Completed DB creation of SQLite3
-                            //WAL mode instead of roll-back/delete
-                            obj.file.run( 'PRAGMA journal_mode=WAL;' );
-                            //Together with the optimize in the maintenance run, see https://sqlite.org/pragma.html#pragma_optimize
-                            obj.file.run( 'PRAGMA optimize=0x10002;' ); 
+                            sqliteSetOptions(func);
+                            //setupFunctions could be put in the sqliteSetupOptions, but left after it for clarity
                             setupFunctions(func);
                         }
                     );
                 });
                 return;
-            } else if (err) { console.log("SQLite Error: " + err); process.exit(0); return; }
+            } else if (err) { console.log("SQLite Error: " + err); process.exit(0); }
 
-            // Completed setup of SQLite3
             //for existing db's
-            //WAL mode instead of roll-back/delete
-            obj.file.run( 'PRAGMA journal_mode=WAL;' );
-            //Together with the optimize in the maintenance run, see https://sqlite.org/pragma.html#pragma_optimize
-            obj.file.run( 'PRAGMA optimize=0x10002;' ); 
+            sqliteSetOptions();
+            //setupFunctions could be put in the sqliteSetupOptions, but left after it for clarity
             setupFunctions(func);
         });
     } else if (parent.args.acebase) {
@@ -1277,6 +1309,45 @@ module.exports.CreateDB = function (parent, func) {
         setupFunctions(func); // Completed setup of NeDB
     }
 
+    function sqliteSetOptions(func) {
+        //get current auto_vacuum mode for comparison
+        obj.file.get('PRAGMA auto_vacuum;', function(err, current){
+            let pragma = 'PRAGMA journal_mode=' + obj.sqliteConfig.journalMode + ';' + 
+                'PRAGMA synchronous='+ obj.sqliteConfig.synchronous + ';' +
+                'PRAGMA journal_size_limit=' + obj.sqliteConfig.journalSize + ';' +
+                'PRAGMA auto_vacuum=' + obj.sqliteConfig.autoVacuum + ';' +
+                'PRAGMA incremental_vacuum=' + obj.sqliteConfig.incrementalVacuum + ';' +
+                'PRAGMA optimize=0x10002;';
+            //check new autovacuum mode, if changing from or to 'none', a VACUUM needs to be done to activate it. See https://www.sqlite.org/pragma.html#pragma_auto_vacuum
+            if ( obj.sqliteConfig.startupVacuum
+                || (current.auto_vacuum == 0 && obj.sqliteConfig.autoVacuum !='none')
+                || (current.auto_vacuum != 0 && obj.sqliteConfig.autoVacuum =='none'))
+                {
+                    pragma += 'VACUUM;';
+                };
+            parent.debug ('db', 'Config statement: ' + pragma);
+            
+            obj.file.exec( pragma,
+                function (err) {
+                if (err) { parent.debug('db', 'Config pragma error: ' + (err.message)) };
+                sqliteGetPragmas(['journal_mode', 'journal_size_limit', 'freelist_count', 'auto_vacuum', 'page_size', 'wal_autocheckpoint', 'synchronous'], function (pragma, pragmaValue) {
+                    parent.debug('db', 'PRAGMA: ' + pragma + '=' + pragmaValue);
+                });
+            });
+        });
+        //setupFunctions(func);
+    }
+
+    function sqliteGetPragmas (pragmas, func){
+        //pragmas can only be gotting one by one
+        pragmas.forEach (function (pragma) {
+            obj.file.get('PRAGMA ' + pragma + ';', function(err, res){
+                if (pragma == 'auto_vacuum') { res[pragma] = SQLITE_AUTOVACUUM[res[pragma]] };
+                if (pragma == 'synchronous') { res[pragma] = SQLITE_SYNCHRONOUS[res[pragma]] };
+                if (func) { func (pragma, res[pragma]); }
+            });
+        });
+    }
     // Create the PostgreSQL tables
     function postgreSqlCreateTables(func) {
         // Database was created, create the tables
@@ -3434,7 +3505,8 @@ module.exports.CreateDB = function (parent, func) {
     obj.performBackup = function (func) {
         parent.debug('db','Entering performBackup');
         try {
-            if (obj.performingBackup) return 1;
+            if (obj.performingBackup) return 'Backup alreay in progress.';
+            if (parent.config.settings.autobackup.backupintervalhours == -1) { if (func) { func('Unable to create backup if backuppath is set to the data folder.'); return 'Backup aborted.' }};
             obj.performingBackup = true;
             let backupPath = parent.backuppath;
             let dataPath = parent.datapath;
@@ -3446,11 +3518,10 @@ module.exports.CreateDB = function (parent, func) {
             obj.newAutoBackupFile = path.join(backupPath, ((typeof parent.config.settings.autobackup.backupname == 'string') ? parent.config.settings.autobackup.backupname : 'meshcentral-autobackup-') + fileSuffix + '.zip');
 
             if ((obj.databaseType == DB_MONGOJS) || (obj.databaseType == DB_MONGODB)) {
-                // Perform a MongoDump in the datadir
+                // Perform a MongoDump
                 const dbname = (parent.args.mongodbname) ? (parent.args.mongodbname) : 'meshcentral';
                 const dburl = parent.args.mongodb;
     
-                //const obj.newDBDumpFile = 'mongodump-' + fileSuffix;
                 obj.newDBDumpFile = path.join(backupPath, (dbname + '-mongodump-' + fileSuffix + '.archive'));
 
                 var cmd = buildMongoDumpCommand();
@@ -3490,16 +3561,6 @@ module.exports.CreateDB = function (parent, func) {
             } else if (obj.databaseType == DB_SQLITE) {
                 //.db3 suffix to escape escape backupfile glob to exclude the sqlite db files
                 obj.newDBDumpFile = path.join(backupPath, databaseName + '-sqlitedump-' + fileSuffix + '.db3');
-                /*undocumented in node-sqlite3 API, check https://github.com/TryGhost/node-sqlite3/blob/593c9d498be2510d286349134537e3bf89401c4a/test/backup.test.js
-                var backup = obj.file.backup(obj.newDBDumpFile);
-                backup.step(-1, function (err) {
-                    if (err) { console.log('SQLite start-backup error: ' + err); obj.backupStatus |=BACKUPFAIL_DBDUMP; obj.createBackupfile(func); };
-                    backup.finish(function (err) {
-                        if (err) { console.log('SQLite backup error: ' + err); obj.backupStatus |=BACKUPFAIL_DBDUMP;};
-                        obj.createBackupfile(func);
-                    });
-                });
-                */
                 // do a VACUUM INTO in favor of the backup API to compress the export, see https://www.sqlite.org/backup.html
                 obj.file.exec('VACUUM INTO \'' + obj.newDBDumpFile + '\'', function (err) {
                     if (err) { console.log('SQLite start-backup error: ' + err); obj.backupStatus |=BACKUPFAIL_DBDUMP;};
@@ -3529,19 +3590,21 @@ module.exports.CreateDB = function (parent, func) {
                 obj.createBackupfile(func);
             }
         } catch (ex) { console.log(ex); };
-        return(0);
+        return 'Starting auto-backup...';
     };
 
     obj.createBackupfile = function(func) {
         parent.debug('db', 'Entering createFileBackup');
         let archiver = require('archiver');
         let archive = null;
+        let zipLevel = Math.min(Math.max(Number(parent.config.settings.autobackup.zipcompression ? parent.config.settings.autobackup.zipcompression : 5),1),9);
+
         //if password defined, create encrypted zip
         if (parent.config.settings.autobackup && (typeof parent.config.settings.autobackup.zippassword == 'string')) {
             try {
                 //Only register format once, otherwise it triggers an error
                 if (archiver.isRegisteredFormat('zip-encrypted') == false) { archiver.registerFormat('zip-encrypted', require('archiver-zip-encrypted')); }
-                archive = archiver.create('zip-encrypted', { zlib: { level: 9 }, encryptionMethod: 'aes256', password: parent.config.settings.autobackup.zippassword });
+                archive = archiver.create('zip-encrypted', { zlib: { level: zipLevel }, encryptionMethod: 'aes256', password: parent.config.settings.autobackup.zippassword });
                 if (func) { func('Creating encrypted ZIP'); }
             } catch (ex) { // registering encryption failed, do not fall back to non-encrypted, fail backup and skip old backup removal as a precaution to not lose any backups
                 obj.backupStatus |= BACKUPFAIL_ZIPMODULE;
@@ -3550,7 +3613,7 @@ module.exports.CreateDB = function (parent, func) {
             }
         } else {
             if (func) { func('Creating a NON-ENCRYPTED ZIP'); }
-            archive = archiver('zip', { zlib: { level: 9 } });
+            archive = archiver('zip', { zlib: { level: zipLevel } });
         }
 
         //original behavior, just a filebackup if dbdump fails : (obj.backupStatus == 0 || obj.backupStatus == BACKUPFAIL_DBDUMP)
@@ -3628,14 +3691,14 @@ module.exports.CreateDB = function (parent, func) {
 
             let globIgnoreFiles;
             //slice in case exclusion gets pushed
-            globIgnoreFiles = parent.config.settings.autobackup.backupignorefilesglob.slice();
+            globIgnoreFiles = parent.config.settings.autobackup.backupignorefilesglob ? parent.config.settings.autobackup.backupignorefilesglob.slice() : [];
             if (parent.config.settings.sqlite3) { globIgnoreFiles.push (datapathFoldername + '/' + databaseName + '.sqlite*'); }; //skip sqlite database file, and temp files with ext -journal, -wal & -shm
             //archiver.glob doesn't seem to use the third param, archivesubdir. Bug?
             //workaround: go up a dir and add data dir explicitly to keep the zip tidy
             archive.glob((datapathFoldername + '/**'), {
                 cwd: datapathParentPath,
                 ignore: globIgnoreFiles,
-                skip: parent.config.settings.autobackup.backupskipfoldersglob
+                skip: (parent.config.settings.autobackup.backupskipfoldersglob ? parent.config.settings.autobackup.backupskipfoldersglob : [])
             });
 
             if (parent.config.settings.autobackup.backupwebfolders) {

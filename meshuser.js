@@ -7157,13 +7157,9 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
                 for (var i in parent.badLoginTable) {
                     badLoginCount++;
                     if (typeof parent.badLoginTable[i] == 'number') {
-                        cmdData.result += "Cooloff for " + Math.floor((parent.badLoginTable[i] - Date.now()) / 60000) + " minute(s)\r\n";
+                        cmdData.result += (i + " - Cooloff for " + Math.floor((parent.badLoginTable[i] - Date.now()) / 60000) + " minute(s)\r\n");
                     } else {
-                        if (parent.badLoginTable[i].length > 1) {
-                            cmdData.result += (i + ' - ' + parent.badLoginTable[i].length + " records\r\n");
-                        } else {
-                            cmdData.result += (i + ' - ' + parent.badLoginTable[i].length + " record\r\n");
-                        }
+                        cmdData.result += (i + ' - ' + parent.badLoginTable[i].length + " attempt(s) until Cooloff ban\r\n");
                     }
                 }
                 if (badLoginCount == 0) { cmdData.result += 'No bad logins.'; }
@@ -7627,10 +7623,9 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
     }
 
     function serverUserCommandAutoBackup(cmdData) {
-        var backupResult = parent.db.performBackup(function (msg) {
+        cmdData.result = parent.db.performBackup(function (msg) {
             try { ws.send(JSON.stringify({ action: 'serverconsole', value: msg, tag: cmdData.command.tag })); } catch (ex) { }
         });
-        if (backupResult == 0) { cmdData.result = 'Starting auto-backup...'; } else { cmdData.result = 'Backup alreay in progress.'; }
     }
 
     function serverUserCommandBackupConfig(cmdData) {
