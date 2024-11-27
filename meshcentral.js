@@ -1992,15 +1992,31 @@ function CreateMeshCentralServer(config, args) {
                         if (typeof config.settings.webpush.gcmapi == 'string') { webpush.setGCMAPIKey(config.settings.webpush.gcmapi); }
                     }
 
+                    // Get the current node version
+                    const verSplit = process.version.substring(1).split('.');
+                    var nodeVersion = parseInt(verSplit[0]) + (parseInt(verSplit[1]) / 100);
+
                     // Setup Firebase
                     if ((config.firebase != null) && (typeof config.firebase.senderid == 'string') && (typeof config.firebase.serverkey == 'string')) {
-                        obj.firebase = require('./firebase').CreateFirebase(obj, config.firebase.senderid, config.firebase.serverkey);
+                        if (nodeVersion >= 23) {
+                            addServerWarning('Firebase is not supported on this version of NodeJS.', 27);
+                        } else {
+                            obj.firebase = require('./firebase').CreateFirebase(obj, config.firebase.senderid, config.firebase.serverkey);
+                        }
                     } else if ((typeof config.firebaserelay == 'object') && (typeof config.firebaserelay.url == 'string')) {
-                        // Setup the push messaging relay
-                        obj.firebase = require('./firebase').CreateFirebaseRelay(obj, config.firebaserelay.url, config.firebaserelay.key);
+                        if (nodeVersion >= 23) {
+                            addServerWarning('Firebase is not supported on this version of NodeJS.', 27);
+                        } else {
+                            // Setup the push messaging relay
+                            obj.firebase = require('./firebase').CreateFirebaseRelay(obj, config.firebaserelay.url, config.firebaserelay.key);
+                        }
                     } else if (obj.config.settings.publicpushnotifications === true) {
-                        // Setup the Firebase push messaging relay using https://alt.meshcentral.com, this is the public push notification server.
-                        obj.firebase = require('./firebase').CreateFirebaseRelay(obj, 'https://alt.meshcentral.com/firebaserelay.aspx');
+                        if (nodeVersion >= 23) {
+                            addServerWarning('Firebase is not supported on this version of NodeJS.', 27);
+                        } else {
+                            // Setup the Firebase push messaging relay using https://alt.meshcentral.com, this is the public push notification server.
+                            obj.firebase = require('./firebase').CreateFirebaseRelay(obj, 'https://alt.meshcentral.com/firebaserelay.aspx');
+                        }
                     }
 
                     // Start periodic maintenance
@@ -4112,7 +4128,8 @@ var ServerWarnings = {
     23: "Unable to load agent icon file: {0}.",
     24: "Unable to load agent logo file: {0}.",
     25: "This NodeJS version does not support OpenID.",
-    26: "This NodeJS version does not support Discord.js."
+    26: "This NodeJS version does not support Discord.js.",
+    27: "Firebase is not supported on this version of NodeJS."
 };
 */
 
@@ -4192,12 +4209,12 @@ function mainStart() {
                 if ((typeof config.domains[i].authstrategies.google == 'object') && (typeof config.domains[i].authstrategies.google.clientid == 'string') && (typeof config.domains[i].authstrategies.google.clientsecret == 'string') && (passport.indexOf('passport-google-oauth20') == -1)) { passport.push('passport-google-oauth20'); }
                 if ((typeof config.domains[i].authstrategies.github == 'object') && (typeof config.domains[i].authstrategies.github.clientid == 'string') && (typeof config.domains[i].authstrategies.github.clientsecret == 'string') && (passport.indexOf('passport-github2') == -1)) { passport.push('passport-github2'); }
                 if ((typeof config.domains[i].authstrategies.azure == 'object') && (typeof config.domains[i].authstrategies.azure.clientid == 'string') && (typeof config.domains[i].authstrategies.azure.clientsecret == 'string') && (typeof config.domains[i].authstrategies.azure.tenantid == 'string') && (passport.indexOf('passport-azure-oauth2') == -1)) { passport.push('passport-azure-oauth2'); passport.push('jwt-simple'); }
-                if ((typeof config.domains[i].authstrategies.oidc == 'object') && (passport.indexOf('openid-client') == -1)) {
+                if ((typeof config.domains[i].authstrategies.oidc == 'object') && (passport.indexOf('openid-client@5.7.1') == -1)) {
                     if ((nodeVersion >= 17)
                         || ((Math.floor(nodeVersion) == 16) && (nodeVersion >= 16.13))
                         || ((Math.floor(nodeVersion) == 14) && (nodeVersion >= 14.15))
                         || ((Math.floor(nodeVersion) == 12) && (nodeVersion >= 12.19))) {
-                        passport.push('openid-client@5.7.0');
+                        passport.push('openid-client@5.7.1');
                     } else {
                         addServerWarning('This NodeJS version does not support OpenID Connect on MeshCentral.', 25);
                         delete config.domains[i].authstrategies.oidc;
@@ -4212,7 +4229,7 @@ function mainStart() {
 
         // Build the list of required modules
         // NOTE: ALL MODULES MUST HAVE A VERSION NUMBER AND THE VERSION MUST MATCH THAT USED IN Dockerfile
-        var modules = ['archiver@7.0.1', 'body-parser@1.20.3', 'cbor@5.2.0', 'compression@1.7.4', 'cookie-session@2.1.0', 'express@4.21.1', 'express-handlebars@7.1.3', 'express-ws@5.0.2', 'ipcheck@0.1.0', 'minimist@1.2.8', 'multiparty@4.2.3', '@yetzt/nedb', 'node-forge@1.3.1', 'ua-parser-js@1.0.39', 'ws@8.18.0', 'yauzl@2.10.0'];
+        var modules = ['archiver@7.0.1', 'body-parser@1.20.3', 'cbor@5.2.0', 'compression@1.7.4', 'cookie-session@2.1.0', 'express@4.21.1', 'express-handlebars@7.1.3', 'express-ws@5.0.2', 'ipcheck@0.1.0', 'minimist@1.2.8', 'multiparty@4.2.3', '@seald-io/nedb', 'node-forge@1.3.1', 'ua-parser-js@1.0.39', 'ws@8.18.0', 'yauzl@2.10.0'];
         if (require('os').platform() == 'win32') { modules.push('node-windows@0.1.14'); modules.push('loadavg-windows@1.1.1'); if (sspi == true) { modules.push('node-sspi@0.2.10'); } } // Add Windows modules
         if (ldap == true) { modules.push('ldapauth-fork@5.0.5'); }
         if (ssh == true) { modules.push('ssh2@1.16.0'); }
@@ -4285,7 +4302,7 @@ function mainStart() {
 
         // Firebase Support
         // Avoid 0.1.8 due to bugs: https://github.com/guness/node-xcs/issues/43
-        if (config.firebase != null) { modules.push('node-xcs@0.1.7'); }
+        if (config.firebase != null) { modules.push('node-xcs@0.1.8'); }
 
         // Syslog support
         if ((require('os').platform() != 'win32') && (config.settings.syslog || config.settings.syslogjson)) { modules.push('modern-syslog@1.2.0'); }
